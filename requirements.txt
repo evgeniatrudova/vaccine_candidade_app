@@ -1,6 +1,8 @@
 streamlit
-biopython
 pandas
-numpy
+biopython
 matplotlib
 seaborn
+numpy
+requests
+plotl
