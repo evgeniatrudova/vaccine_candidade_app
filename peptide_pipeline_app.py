@@ -1,403 +1,431 @@
-# Install Python3:    python3 --version  &  python --version
-#  pip install biopython
-#  pip install pandas
-#  pip install numpy
-#  pip install matplotlib
-#  pip install streamlit
-#  pip install py3dmol
-#  pip install seaborn 
-#  cd "C:\"
-# Control Data :streamlit run peptide_pipeline_app.py
-
-
 import streamlit as st
+import io
 import pandas as pd
-import time
-import random
-from Bio import Entrez, SeqIO
-from Bio.SeqUtils import ProtParamData
-from Bio.SeqUtils.ProtParam import ProteinAnalysis
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
+import matplotlib.pyplot as plt
+import plotly.express as px
+import plotly.graph_objects as go
+from Bio import Entrez, SeqIO
+from Bio.SeqUtils.ProtParam import ProteinAnalysis
 
+# ---------------- CONFIG ---------------- #
+Entrez.email = "your.email@example.com"  # Replace with your email
+parker_hydro_scale = {
+    'A': -0.5, 'R': 3.0, 'N': 0.2, 'D': 3.0, 'C': -1.0,
+    'Q': 0.2, 'E': 3.0, 'G': 0.0, 'H': -0.5, 'I': -1.8,
+    'L': -1.8, 'K': 3.0, 'M': -1.3, 'F': -2.5, 'P': 0.0,
+    'S': 0.3, 'T': -0.4, 'W': -3.4, 'Y': -2.3, 'V': -1.5
+}
 
-# -------------------------------- CONFIG -------------------------------- #
-Entrez.email = "your.email@example.com"  
-
-# ---  Adjustable default list in search bar
-PARASITE_LIST = [
-    "Homo sapiens",
-    "Plasmodium falciparum",
-    "Toxocara canis",
-    "Ascaris suum",
-    "Schistosoma mansoni",
-    "Fasciola hepatica",
-    "Meloidogyne incognita",
-    "Haemonchus contortus",
-    "Ancylostoma caninum",
-    "Trichuris trichiura",
-    "Onchocerca volvulus",
-    "Cysticercus cellulosae",
-    "Phytophthora infestans"
+ORGANISMS = [
+    "Homo sapiens", "Plasmodium falciparum", "Toxocara canis", "Ascaris suum",
+    "Schistosoma mansoni", "Fasciola hepatica", "Other..."
 ]
-kd_scale = ProtParamData.kd
 
-
-# ----------------------Functions ------------------------- #
-
-# --- 1.  explain_parameters, text explaining parameters 
-# --- 2.  build_entrez_query, NCBI’s Entrez API/Taxonomy ID allowing user to search for other organisms
-# --- 3.  calculate_protein_hydrophobicity Calculates average Kyte Doolittle score for found amino acid seq
-# --- 4.  trypsin_digest  Simulates proteolytic cleavage by ttrypsin, cutting protein sequence after K or R residues unless followed by P.
-# --- 5.  analyze_filter_peptides Filter or biochemical properties by length, hydrophobicity, GRAVY, molecular weight and instability index.
-# --- 6.  compute_fitness  Propotype candidade score , from ideal length of 15aa
-# --- 7.  peptide_epitope_similarity, Highest character by character match count between peptide and epitope
-# --- 8.  fetch_proteome, Queries NCBI Protein DB for an organism, downloads FASTA sequences, calculates their hydrophobicity, stores them in session state, and returns the protein records.
-# --- 9.  get_peptide_dataframe Generates a DataFrame
-
-def explain_parameters():
-    return {
-        "Length": "Length of the peptide in amino acids.",
-        "Instability Index": "Predicts protein stability; values <40 generally indicate stable peptides.",
-        "GRAVY": "Grand Average of Hydropathy; positive values indicate hydrophobic peptides, negative values hydrophilic.",
-        "Molecular Weight": "Molecular weight of the peptide in Daltons (Da).",
-        "Peptide Hydrophobicity": "Average hydrophobicity score based on the Kyte-Doolittle scale for the peptide.",
-        "Protein Hydrophobicity": "Average hydrophobicity of the full parent protein sequence.",
-        "Best Epitope Match Score": "Max similarity score of the peptide aligned against experimental epitopes.",
-        "Candidate Score": "Composite score combining instability, hydrophobicity, and length relative to ideal vaccine peptides."
+# ---------------- Styles ---------------- #
+st.markdown("""
+<style>
+    body { font-family: 'Segoe UI', sans-serif; background-color: #fafafa; color: #222; }
+    .main > div { max-width: 900px; margin: auto; padding: 20px 15px; }
+    .stButton>button {
+        background-color: #1976d2; color: white; border-radius: 5px; padding: 8px 16px;
+        font-weight: 600; border: none; transition: background-color 0.3s ease;
     }
+    .stButton>button:hover {background-color: #115293;}
+    .card {
+        background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        border-radius: 10px; padding: 20px; margin-bottom: 20px;
+    }
+    .peptide-details {
+        display: flex; flex-wrap: nowrap; gap: 20px; font-weight: 600;
+        margin-bottom: 16px; flex-wrap: wrap;
+    }
+    .peptide-details > div { white-space: nowrap; }
+    .explanation-text {
+      font-style: italic; color: #555; margin-bottom: 8px;
+    }
+    .color-square {
+      width: 20px;
+      height: 20px;
+      border-radius: 3px;
+      display: inline-block;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    @media (prefers-color-scheme: dark) {
+        body { background-color: #121212; color: #eee; }
+        .card { background: #1e1e1e; box-shadow: 0 1px 5px rgba(255,255,255,0.1); }
+        .stButton>button { background-color: #0d47a1; }
+        .stButton>button:hover { background-color: #1565c0; }
+        .explanation-text { color: #ccc; }
+    }
+</style>
+""", unsafe_allow_html=True)
 
-def build_entrez_query(organism_query, keywords=None):
-    organism_query = organism_query.strip()
-    if organism_query.lower().startswith("txid"):
-        query = f"{organism_query}[Organism]"
-    elif organism_query.isdigit():
-        query = f"txid{organism_query}[Organism]"
-    else:
-        query = f"{organism_query}[Organism]"
-    if keywords:
-        query += f" {keywords}"
-    return query
-
-def calculate_protein_hydrophobicity(seq):
-    values = [kd_scale.get(aa, 0) for aa in seq.upper()]
-    return sum(values) / len(values) if values else 0
+# ---------------- Functions ---------------- #
+def fetch_protein_sequence(organism, protein_term):
+    try:
+        query = f"{protein_term} AND {organism}[Organism]"
+        ids = Entrez.read(Entrez.esearch(db="protein", term=query, retmax=1))["IdList"]
+        if not ids:
+            return {"error": f"No protein found for '{protein_term}' in '{organism}'"}
+        uid = ids[0]
+        record = SeqIO.read(Entrez.efetch(db="protein", id=uid, rettype="gb", retmode="text"), "genbank")
+        fasta_str = io.StringIO()
+        SeqIO.write(record, fasta_str, "fasta")
+        ncbi_url = f"https://www.ncbi.nlm.nih.gov/protein/{uid}"
+        return {"record": record, "FASTA": fasta_str.getvalue(), "ncbi_url": ncbi_url}
+    except Exception as e:
+        return {"error": str(e)}
 
 def trypsin_digest(seq):
-    peptides, start = [], 0
     seq = str(seq)
-    for i in range(len(seq) - 1):
-        if seq[i] in ["K", "R"] and seq[i + 1] != "P":
-            peptides.append(seq[start: i + 1])
-            start = i + 1
+    peptides = []
+    start = 0
+    for i in range(len(seq)-1):
+        if seq[i] in ["K","R"] and seq[i+1] != "P":
+            peptides.append(seq[start:i+1])
+            start = i+1
     peptides.append(seq[start:])
     return peptides
 
-def analyze_filter_peptides(peptides, min_len, max_len, min_gravy, max_gravy,
-                           min_instab, max_instab, min_mw, max_mw):
-    out = []
+def calculate_protein_hydrophobicity(seq):
+    vals = [parker_hydro_scale.get(aa, 0) for aa in seq.upper()]
+    if vals:
+        return sum(vals)/len(vals)
+    return 0
+
+def calculate_aliphatic_index(seq):
+    pa = ProteinAnalysis(str(seq))
+    aa_percent = pa.amino_acids_percent
+    a = aa_percent.get('A',0)*100
+    v = aa_percent.get('V',0)*100
+    i = aa_percent.get('I',0)*100
+    l = aa_percent.get('L',0)*100
+    return a + 2.9*v + 3.9*(i+l)
+
+def bepi_pred_like(seq, threshold=1.0, window=7):
+    seq = seq.upper()
+    scores = []
+    for i in range(len(seq)):
+        win = seq[max(0,i-window//2):min(len(seq),i+window//2+1)]
+        avg_score = np.mean([parker_hydro_scale.get(aa,0) for aa in win])
+        scores.append(avg_score)
+    epitopes = []
+    cur = ""
+    for i,aa in enumerate(seq):
+        if scores[i]>=threshold:
+            cur += aa
+        else:
+            if len(cur)>=4:
+                epitopes.append(cur)
+            cur = ""
+    if len(cur)>=4:
+        epitopes.append(cur)
+    return epitopes, scores
+
+def analyse_peptides_with_epitopes(peptides, threshold, window):
+    rows = []
     for pep in peptides:
         pa = ProteinAnalysis(pep)
-        if not (min_len <= len(pep) <= max_len):
-            continue
-        inst = pa.instability_index()
-        gravy = pa.gravy()
-        mw = pa.molecular_weight()
-        pep_hydro = calculate_protein_hydrophobicity(pep)
-        if (min_gravy <= gravy <= max_gravy and
-            min_instab <= inst <= max_instab and
-            min_mw <= mw <= max_mw):
-            out.append({
-                "Peptide": pep,
-                "Length": len(pep),
-                "Instability Index": round(inst, 2),
-                "GRAVY": round(gravy, 2),
-                "Molecular Weight": round(mw, 2),
-                "Peptide Hydrophobicity": round(pep_hydro, 3)
-            })
-    return out
+        epis,_ = bepi_pred_like(pep, threshold, window)
+        rows.append({
+            "Select": False,
+            "Predicted Epitopes": ", ".join(epis) if epis else "-",
+            "Peptide": pep,
+            "Length": len(pep),
+            "MW": round(pa.molecular_weight(),2),
+            "Instability": round(pa.instability_index(),2),
+            "GRAVY": round(pa.gravy(),3),
+            "Hydrophobicity": round(calculate_protein_hydrophobicity(pep),3),
+            "Aliphatic Index": round(calculate_aliphatic_index(pep),2)
+        })
+    return pd.DataFrame(rows)
 
-def compute_fitness(inst, gravy, length):
-    return inst + abs(gravy) * 10 + abs(length - 15)
-
-def peptide_epitope_similarity(peptide, epitopes):
-    best_score = 0
-    for epi in epitopes:
-        score = sum(1 for a, b in zip(peptide, epi) if a == b)
-        if score > best_score:
-            best_score = score
-    return best_score
-
-def fetch_proteome(query, retmax):
-    ids = Entrez.read(Entrez.esearch(db="protein", term=query, retmax=retmax), validate=False)["IdList"]
-    proteins, seq_dict, hydros = [], {}, {}
-    bar = st.progress(0)
-    for i, pid in enumerate(ids):
-        rec = SeqIO.read(Entrez.efetch(db="protein", id=pid, rettype="fasta", retmode="text"), "fasta")
-        seq_dict[rec.id] = str(rec.seq)
-        hydros[rec.id] = calculate_protein_hydrophobicity(str(rec.seq))
-        proteins.append(rec)
-        bar.progress((i + 1) / len(ids))
-        time.sleep(0.1)
-    st.session_state["protein_seq_dict"] = seq_dict
-    st.session_state["protein_hydrophobicity"] = hydros
-    return proteins
-
-def get_peptide_dataframe(proteins, filters, exp_peptides):
-    records = []
-    hydros = st.session_state.get("protein_hydrophobicity", {})
-    for prot in proteins:
-        for pep in analyze_filter_peptides(trypsin_digest(prot.seq), **filters):
-            pid = prot.id
-            sim = peptide_epitope_similarity(pep["Peptide"].upper(), exp_peptides) if exp_peptides else 0
-            records.append({
-                **pep,
-                "Protein ID": pid,
-                "Protein Hydrophobicity": hydros.get(pid, 0),
-                "Best Epitope Match Score": sim,
-                "Candidate Score": compute_fitness(pep["Instability Index"], pep["GRAVY"], pep["Length"])
-            })
-    df = pd.DataFrame(records)
-    if df.empty:
-        return df
-    return df.sort_values(["Candidate Score", "Best Epitope Match Score"], ascending=[True, False])
-
-# ------------------- Testing mode ---------------------- #
-def generate_random_nucleotide_sequence(length=60):
-    nucleotides = ['A', 'C', 'G', 'T']
-    return ''.join(random.choices(nucleotides, k=length))
-
-codon_table = {
-    'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
-    'ACA':'T', 'ACC':'T', 'ACG':'T', 'ACT':'T',
-    'AAC':'N', 'AAT':'N', 'AAA':'K', 'AAG':'K',
-    'AGC':'S', 'AGT':'S', 'AGA':'R', 'AGG':'R',
-    'CTA':'L', 'CTC':'L', 'CTG':'L', 'CTT':'L',
-    'CCA':'P', 'CCC':'P', 'CCG':'P', 'CCT':'P',
-    'CAC':'H', 'CAT':'H', 'CAA':'Q', 'CAG':'Q',
-    'CGA':'R', 'CGC':'R', 'CGG':'R', 'CGT':'R',
-    'GTA':'V', 'GTC':'V', 'GTG':'V', 'GTT':'V',
-    'GCA':'A', 'GCC':'A', 'GCG':'A', 'GCT':'A',
-    'GAC':'D', 'GAT':'D', 'GAA':'E', 'GAG':'E',
-    'GGA':'G', 'GGC':'G', 'GGG':'G', 'GGT':'G',
-    'TCA':'S', 'TCC':'S', 'TCG':'S', 'TCT':'S',
-    'TTC':'F', 'TTT':'F', 'TTA':'L', 'TTG':'L',
-    'TAC':'Y', 'TAT':'Y', 'TAA':'_', 'TAG':'_',
-    'TGC':'C', 'TGT':'C', 'TGA':'_', 'TGG':'W',
-}
-
-def translate_dna(sequence):
-    sequence = sequence.upper()
-    peptide = ''
-    for i in range(0, len(sequence) - 2, 3):
-        codon = sequence[i:i+3]
-        aa = codon_table.get(codon, 'X')
-        if aa == '_':
-            break
-        peptide += aa
-    return peptide
-
-def generate_theoretical_placeholder_peptides_with_placeholder(placeholder_peptide):
-    base_peptides = []
-    base = "ACDEFGHIKLMNPQRSTVWY"
-    for length in range(8, 13):
-        seq = base[:length]
-        inst = ProteinAnalysis(seq).instability_index()
-        gravy = ProteinAnalysis(seq).gravy()
-        mw = ProteinAnalysis(seq).molecular_weight()
-        pep_hydro = calculate_protein_hydrophobicity(seq)
-        base_peptides.append(dict(
-            Peptide=seq,
-            Length=length,
-            **{"Instability Index": round(inst, 2)},
-            **{"GRAVY": round(gravy, 2)},
-            **{"Molecular Weight": round(mw, 2)},
-            **{"Peptide Hydrophobicity": round(pep_hydro, 3)},
-            **{"Protein ID": f"Theoretical_{length}"},
-            **{"Protein Hydrophobicity": round(gravy, 2)},
-            **{"Best Epitope Match Score": 0},
-            **{"Candidate Score": round(compute_fitness(inst, gravy, length), 2)}
-        ))
-    df = pd.DataFrame(base_peptides)
-    if placeholder_peptide and len(placeholder_peptide) >= 6:
-        inst = ProteinAnalysis(placeholder_peptide).instability_index()
-        gravy = ProteinAnalysis(placeholder_peptide).gravy()
-        mw = ProteinAnalysis(placeholder_peptide).molecular_weight()
-        pep_hydro = calculate_protein_hydrophobicity(placeholder_peptide)
-        placeholder_dict = dict(
-            Peptide=placeholder_peptide,
-            Length=len(placeholder_peptide),
-            **{"Instability Index": round(inst, 2)},
-            **{"GRAVY": round(gravy, 2)},
-            **{"Molecular Weight": round(mw, 2)},
-            **{"Peptide Hydrophobicity": round(pep_hydro, 3)},
-            **{"Protein ID": "Placeholder_Peptide"},
-            **{"Protein Hydrophobicity": round(gravy, 2)},
-            **{"Best Epitope Match Score": 0},
-            **{"Candidate Score": round(compute_fitness(inst, gravy, len(placeholder_peptide)), 2)}
+def plot_epitope_match_heatmap(peptide, epitope):
+    max_len = max(len(peptide), len(epitope))
+    mat = np.zeros((1, max_len))
+    for i in range(min(len(peptide), len(epitope))):
+        mat[0, i] = 1 if peptide[i] == epitope[i] else 0
+    fig = px.imshow(mat,
+                    color_continuous_scale='YlGnBu',
+                    labels=dict(x="Residue Position in Peptide", y="", color="Match (1=Yes)"),
+                    x=list(peptide) + ['']*(max_len - len(peptide)),
+                    y=["Match"])
+    fig.update_layout(
+        height=180,
+        margin=dict(l=20, r=20, t=40, b=20),
+        title="Residue-by-residue Match Heatmap between Selected Peptide and Theoretical Epitope",
+        coloraxis_colorbar=dict(
+            title="Match",
+            tickvals=[0, 0.5, 1],
+            ticktext=["Bad Match (0)", "Medium Match (~0.5)", "Good Match (1)"]
         )
-        df = pd.concat([pd.DataFrame([placeholder_dict]), df], ignore_index=True)
-    return df
-
-def plot_epitope_peptide_heatmap(peptides, epitopes):
-    if not peptides or not epitopes:
-        st.info("No peptides or epitopes to plot.")
-        return
-    sim_matrix = np.zeros((len(peptides), len(epitopes)))
-    for i, pep in enumerate(peptides):
-        for j, epi in enumerate(epitopes):
-            sim_matrix[i, j] = sum(1 for a, b in zip(pep, epi) if a == b)
-    df_heatmap = pd.DataFrame(sim_matrix, index=peptides, columns=epitopes)
-    plt.figure(figsize=(max(8, len(epitopes)*0.5), max(6, len(peptides)*0.4)))
-    sns.heatmap(df_heatmap, annot=True, fmt=".0f", cmap="YlGnBu", cbar_kws={'label': 'Match Count'})
-    st.pyplot(plt.gcf())
-    plt.clf()
-
-def show_peptide_detail(row, epitopes):
-    st.header(f"Detail for Peptide: {row['Peptide']}")
-    st.info(
-        "The full untrimmed protein sequence is shown below; peptides are generated by simulating trypsin digestion "
-        "at lysine (K) and arginine (R) residues, except when followed by proline (P), reflecting a standard proteomic breakdown step "
-        "used for peptide candidate analysis."
     )
-    prot_id = row.get("Protein ID", None)
-    if prot_id and prot_id in st.session_state.get("protein_seq_dict", {}):
-        full_seq = st.session_state["protein_seq_dict"][prot_id]
-        st.subheader("Full Protein FASTA Sequence:")
-        st.code(f">{prot_id}\n{full_seq}", language="fasta")
+    st.plotly_chart(fig, use_container_width=True)
+
+def plot_score_profile(seq, scores, threshold):
+    fig, ax = plt.subplots(figsize=(min(12,len(seq)*0.3),2.5))
+    ax.plot(range(1,len(seq)+1), scores, color="#1976d2", linewidth=2, label='Epitope Score')
+    ax.axhline(y=threshold, color='red', linestyle='--', label='Threshold Cutoff')
+    ax.set_xticks(range(1,len(seq)+1))
+    ax.set_xticklabels(list(seq), rotation=90)
+    ax.set_ylabel("Score")
+    ax.set_xlabel("Residue Position")
+    ax.set_title("Amino Acid Residue Epitope Score Profile (BepiPred-like Parker Scale)")
+    ax.legend(loc='upper right')
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+def plot_color_gradient_legend():
+    gradient = np.linspace(0,1,300).reshape(1,-1)
+    colorscale = [
+        [0.0, 'rgb(8, 69, 148)'],    # dark blue - bad match
+        [0.5, 'rgb(253, 187, 132)'], # yellow - medium match
+        [1.0, 'rgb(65, 171, 93)']    # green - good match
+    ]
+    fig = go.Figure(data=go.Heatmap(
+        z=gradient,
+        colorscale=colorscale,
+        showscale=False,
+        hoverinfo='skip',
+        xgap=0, ygap=0,
+        zmin=0, zmax=1
+    ))
+    fig.update_layout(
+        height=60,
+        margin=dict(l=20,r=20,t=30,b=10),
+        yaxis=dict(showticklabels=False,showgrid=False,zeroline=False),
+        xaxis=dict(
+            tickmode='array',
+            tickvals=[0,150,299],
+            ticktext=["Bad Match","Medium Match","Good Match"],
+            showgrid=False,
+            zeroline=False
+        ),
+        title="Residue Match Heatmap Color Gradient Legend"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def trim_fasta_sequence(fasta_str):
+    lines = fasta_str.splitlines()
+    if not lines or not lines[0].startswith(">"):
+        return "", "Invalid FASTA format."
+    header = lines[0]
+    sequence = "".join(lines[1:])
+    if len(sequence) < 30:
+        return "", "Sequence too short to trim."
+    trimmed_seq = sequence[10:-10]
+    trimmed_fasta = f"{header} trimmed\n{trimmed_seq}"
+    explanation = (
+        "The FASTA sequence was trimmed by removing 10 residues from the N- and C-termini "
+        "to focus on the core antigenic region. This simulates removing non-relevant flanking "
+        "regions that may affect epitope prediction."
+    )
+    return trimmed_fasta, explanation
+
+def match_score_color(avg_match):
+    """Map average match (0-1) to color hex for table indication."""
+    if avg_match <= 0.33:
+        return '#084594'  # Dark blue - bad match
+    elif avg_match <= 0.66:
+        return '#fdbb84'  # Yellow - medium match
     else:
-        st.warning("Full protein sequence not available for this peptide.")
+        return '#41ab5d'  # Green - good match
 
-    st.subheader("Calculated Parameters Explanation")
-    explanations = explain_parameters()
-    for key in explanations:
-        if key in row:
-            st.markdown(f"**{key}:** {row[key]}  \n*{explanations[key]}*")
+def compute_avg_match(peptide, epitope):
+    l = min(len(peptide), len(epitope))
+    matches = [1 if peptide[i]==epitope[i] else 0 for i in range(l)]
+    if matches:
+        return sum(matches)/len(matches)
+    return 0
 
-    if prot_id:
-        ncbi_link = f"https://www.ncbi.nlm.nih.gov/protein/{prot_id}"
-        st.markdown(f"[View parent protein on NCBI]({ncbi_link})")
+# ----------------  ---------------- #
+st.title(" Vaccine Candidate ")
 
-    if epitopes:
-        best_epi = max(epitopes, key=lambda e: peptide_epitope_similarity(row['Peptide'], [e]))
-        score = peptide_epitope_similarity(row['Peptide'], [best_epi])
-        st.subheader(f"Best Epitope Match (Score: {score})")
-        st.markdown("**Alignment:**")
-        aligned_html = ""
-        for p_aa, e_aa in zip(row['Peptide'], best_epi):
-            color = 'green' if p_aa == e_aa else 'red'
-            aligned_html += f"<span style='color:{color}; font-weight:bold'>{p_aa}</span>"
-        st.markdown(aligned_html, unsafe_allow_html=True)
+organism_choice = st.selectbox("Select Organism", ORGANISMS)
+organism = st.text_input("Enter organism name") if organism_choice == "Other..." else organism_choice
 
-    plot_epitope_peptide_heatmap([row['Peptide']], epitopes)
+protein_term = st.text_input("Protein name or keyword")
 
-  
-    if row.get("Protein ID", "").startswith("Theoretical") or row.get("Protein ID", "") == "Placeholder_Peptide":
-        st.subheader("Theoretical Fit Prototypes Comparison")
-        prototypes = []
-        base = "ACDEFGHIKLMNPQRSTVWY"
-        for label, length, inst, gravy in [("Bad", 12, 55, -1.5), ("Medium", 15, 35, 0.0), ("Good", 15, 25, 0.8)]:
-            seq = base[:length]
-            mw = ProteinAnalysis(seq).molecular_weight()
-            score = compute_fitness(inst, gravy, length)
-            prototypes.append({
-                "Peptide": seq,
-                "Length": length,
-                "Instability Index": inst,
-                "GRAVY": gravy,
-                "Molecular Weight": round(mw, 2),
-                "Peptide Hydrophobicity": round(gravy, 3),
-                "Protein ID": f"Prototype_{label}",
-                "Protein Hydrophobicity": gravy,
-                "Best Epitope Match Score": 0,
-                "Candidate Score": round(score, 2),
-                "Label": label
-            })
-        df_protos = pd.DataFrame(prototypes)
-        st.table(df_protos[["Label", "Peptide", "Candidate Score", "Instability Index", "GRAVY", "Molecular Weight"]])
+st.markdown("""
+**Epitope Prediction Threshold:** Determines the minimum score above which residues are considered part of epitopes.  
+A lower threshold means **more sensitive** detection (more epitopes, more false positives),  
+a higher threshold means **stricter** detection (fewer epitopes, more confident).  
+""")
 
-# ---------------------- Main ------------------------- #
-def main():
-    st.title("Vaccine Candidate Finder")
-    parasite_option = st.selectbox("Select organism from list or choose 'Other' to enter manually:",
-                                  PARASITE_LIST + ["Other (enter manually)"])
-    if parasite_option == "Other (enter manually)":
-        custom_organism = st.text_input("Enter organism name or taxonomy ID", placeholder="e.g. txid5833 or 5833 or Homo sapiens")
-        organism_query = custom_organism.strip()
-    else:
-        organism_query = parasite_option
+threshold = st.slider("Epitope prediction threshold", 0.5, 2.0, 1.0, 0.1)
 
-    col1, col2 = st.columns(2)
-    if col1.button("Fetch Mode"):
-        st.session_state["mode"] = "fetch"
-    if col2.button("Testing Mode"):
-        st.session_state["mode"] = "test"
+st.markdown("""
+**Sliding Window Size:** Number of neighboring residues averaged when scoring each position.  
+Smaller windows detect fine local variation; larger windows produce smoother, broader epitope regions.
+""")
 
-    if "mode" not in st.session_state:
+window_size = st.slider("Sliding window size", 3, 15, 7, 2)
+
+if st.button("Find & Predict Epitopes"):
+    if not organism.strip() or not protein_term.strip():
+        st.error("Please provide both organism and protein name")
         st.stop()
+    res = fetch_protein_sequence(organism, protein_term)
+    if "error" in res:
+        st.error(res["error"])
+    else:
+        st.session_state["ncbi_result"] = res
+        st.session_state["record"] = res["record"]
+        st.session_state["trimmed"] = None
+        st.session_state["show_all_epitopes"] = False
 
-    if st.session_state["mode"] == "fetch":
-        st.header("Fetch Mode")
-        fetch_keywords = st.text_input("Protein keywords (optional)")
-        exp_peptides_input = st.text_area("Experimental/Reference peptides (one per line)", height=100)
-        exp_peptides = [p.strip().upper() for p in exp_peptides_input.splitlines() if p.strip()]
-        with st.expander("Peptide Filters"):
-            min_len, max_len = st.slider("Length", 6, 30, (8, 20))
-            min_gravy, max_gravy = st.slider("GRAVY", -2.0, 2.0, (-1.0, 1.0), 0.05)
-            min_instab, max_instab = st.slider("Instability Index", 1.0, 120.0, (1.0, 40.0), 0.5)
-            min_mw, max_mw = st.slider("Mol. Weight (Da)", 500.0, 5000.0, (700.0, 3000.0), 50.0)
-        max_proteins = st.number_input("Max proteins to fetch", 10, 500, 50, 10)
-        filters = dict(min_len=min_len, max_len=max_len,
-                       min_gravy=min_gravy, max_gravy=max_gravy,
-                       min_instab=min_instab, max_instab=max_instab,
-                       min_mw=min_mw, max_mw=max_mw)
+if "ncbi_result" in st.session_state:
+    res = st.session_state["ncbi_result"]
+    record = st.session_state["record"]
 
-        if st.button("Run Fetch & Analyse"):
-            fetch_query = build_entrez_query(organism_query, keywords=fetch_keywords)
-            proteins = fetch_proteome(fetch_query, max_proteins)
-            df = get_peptide_dataframe(proteins, filters, exp_peptides)
-            st.session_state["result_df"] = df
-            st.session_state["epitopes"] = exp_peptides
-            st.session_state["protein_seq_dict"] = st.session_state.get("protein_seq_dict", {})
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Fetched Protein Information")
+    st.markdown(f"**ID:** {record.id}")
+    st.markdown(f"**Description:** {record.description}")
+    st.markdown(f"**NCBI Record:** [View on NCBI]({res['ncbi_url']})")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-        if "result_df" in st.session_state and not st.session_state["result_df"].empty:
-            df = st.session_state["result_df"]
-            st.dataframe(df)
+    show_fasta = st.checkbox("Show FASTA sequence")
+    if show_fasta:
+        st.text_area("FASTA", res["FASTA"], height=200)
+        if st.button("Trim FASTA sequence"):
+            trimmed, explanation = trim_fasta_sequence(res["FASTA"])
+            st.session_state["trimmed"] = (trimmed, explanation)
 
-            st.subheader("Inspect a Peptide Candidate")
-            selected_peptide = st.selectbox("Select peptide to show details", ["None"] + df["Peptide"].tolist())
-            if selected_peptide != "None":
-                sel_row = df[df["Peptide"] == selected_peptide].iloc[0]
-                show_peptide_detail(sel_row, st.session_state.get("epitopes", []))
+    if st.session_state.get("trimmed"):
+        trimmed_seq, explanation = st.session_state["trimmed"]
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("Trimmed FASTA Sequence and Explanation")
+        st.markdown(explanation)
+        st.text_area("Trimmed FASTA", trimmed_seq, height=180)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-            plot_epitope_peptide_heatmap(df["Peptide"].tolist(), st.session_state.get("epitopes", []))
+    seq_orig = str(record.seq)
+    peptides = trypsin_digest(seq_orig)
+    df_peps = analyse_peptides_with_epitopes(peptides, threshold, window_size)
 
-    elif st.session_state["mode"] == "test":
-        st.header("Testing Mode")
-        if st.button("Generate random DNA & peptides"):
-            dna_seq = generate_random_nucleotide_sequence(60)
-            pep_seq = translate_dna(dna_seq)
-            df = generate_theoretical_placeholder_peptides_with_placeholder(pep_seq)
-            epitopes = [p[:-1] + ("A" if p[-1] != "A" else "C") for p in df["Peptide"]]
-            st.session_state["result_df"] = df
-            st.session_state["epitopes"] = epitopes
-            st.session_state["protein_seq_dict"] = {row["Protein ID"]: row["Peptide"] for _, row in df.iterrows()}
-            st.success(f"Generated random DNA sequence: {dna_seq}")
-            st.success(f"Translated peptide sequence: {pep_seq}")
+    # 
+    df_peps["HasEpitope"] = df_peps["Predicted Epitopes"].apply(lambda x: 0 if x.strip() == "-" else 1)
+    df_peps = df_peps.sort_values(by="HasEpitope", ascending=False).drop(columns=["HasEpitope"]).reset_index(drop=True)
 
-        if "result_df" in st.session_state:
-            df = st.session_state["result_df"]
-            st.dataframe(df)
+    # 
+    cols_order = ["Select", "Predicted Epitopes", "Peptide", "Length", "MW",
+                  "Instability", "GRAVY", "Hydrophobicity", "Aliphatic Index"]
+    df_peps = df_peps[cols_order]
 
-            st.subheader("Inspect a Peptide Candidate")
-            selected_peptide = st.selectbox("Select peptide to show details", ["None"] + df["Peptide"].tolist())
-            if selected_peptide != "None":
-                sel_row = df[df["Peptide"] == selected_peptide].iloc[0]
-                show_peptide_detail(sel_row, st.session_state.get("epitopes", []))
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("Peptide Biochemical Properties + Predicted Epitopes")
+    edited_df = st.data_editor(df_peps,
+                               column_config={"Select": st.column_config.CheckboxColumn()},
+                               use_container_width=True,
+                               num_rows="dynamic")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-            plot_epitope_peptide_heatmap(df["Peptide"].tolist(), st.session_state.get("epitopes", []))
+    selected_rows = edited_df[edited_df["Select"]]
+    if not selected_rows.empty:
+        sel_pep = selected_rows.iloc[0]
+        st.markdown('<div class="card">', unsafe_allow_html=True)
 
+        st.markdown(f"### Details for Selected Peptide: `{sel_pep['Peptide']}`")
+        cols = st.columns([1,1,1,1,1,1,2])
+        cols[0].markdown(f"**Length:** {sel_pep['Length']}")
+        cols[1].markdown(f"**MW:** {sel_pep['MW']} Da")
+        cols[2].markdown(f"**Instability:** {sel_pep['Instability']}")
+        cols[3].markdown(f"**GRAVY:** {sel_pep['GRAVY']}")
+        cols[4].markdown(f"**Hydrophobicity:** {sel_pep['Hydrophobicity']}")
+        cols[5].markdown(f"**Aliphatic Index:** {sel_pep['Aliphatic Index']}")
+        cols[6].markdown(f"**Linked Protein:** [View on NCBI]({res['ncbi_url']})")
 
-if __name__ == "__main__":
-    main()
+        st.markdown("""
+            <div class="explanation-text">
+            The plot below shows per-residue epitope scores computed with a <strong>BepiPred-like algorithm</strong> 
+            using the Parker hydrophilicity scale.
+            Residues with scores above the red dashed line (threshold) are predicted epitope residues.
+            Continuous stretches of ≥4 such residues are predicted as epitopes.
+            </div>
+        """, unsafe_allow_html=True)
+
+        theoretical_epitopes, residue_scores = bepi_pred_like(sel_pep['Peptide'], threshold, window_size)
+
+        st.subheader("Residue Epitope Score Profile")
+        plot_score_profile(sel_pep['Peptide'], residue_scores, threshold)
+
+        if theoretical_epitopes:
+            for i, epi in enumerate(theoretical_epitopes, 1):
+                st.markdown(f"**Theoretical Epitope {i}:** `{epi}`")
+                st.subheader(f"Residue Match Heatmap for Epitope {i}")
+                st.markdown("""
+                The heatmap below visualizes residue-by-residue matches between the peptide and theoretical epitope.
+                The horizontal color gradient legend below explains colors:
+                <ul>
+                <li><span style='color:#084594;'>Dark Blue</span>: Bad Match (mismatched residue)</li>
+                <li><span style='color:#fdbb84;'>Yellow</span>: Medium Match (partial similarity)</li>
+                <li><span style='color:#41ab5d;'>Bright Green</span>: Good Match (identical residue)</li>
+                </ul>
+                """, unsafe_allow_html=True)
+                plot_epitope_match_heatmap(sel_pep['Peptide'], epi)
+                plot_color_gradient_legend()
+        else:
+            st.info("No predicted epitopes above threshold.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # Show All Epitope Matches Toggle Button
+    if st.button("Show All Epitope Matches"):
+        st.session_state["show_all_epitopes"] = not st.session_state.get("show_all_epitopes", False)
+
+    if st.session_state.get("show_all_epitopes", False):
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("All Peptides and Their Predicted Epitopes with Match Quality")
+
+        # Extract peptides with predicted epitopes
+        epitopes_display = df_peps[df_peps["Predicted Epitopes"] != "-"].copy()
+        if epitopes_display.empty:
+            st.info("No predicted epitopes found in any peptides above threshold.")
+        else:
+              # 
+            def avg_match_and_color(row):
+                peptide = row["Peptide"]
+                # Use first predicted epitope for match calculation
+                epitope = row["Predicted Epitopes"].split(", ")[0]
+                avg_match = compute_avg_match(peptide, epitope)
+                color = match_score_color(avg_match)
+                return pd.Series([avg_match, color])
+
+            epitopes_display[["AvgMatch", "ColorHex"]] = epitopes_display.apply(avg_match_and_color, axis=1)
+
+              # 
+            epitopes_display["MatchColorSquare"] = epitopes_display["ColorHex"].apply(
+                lambda c: f'<div class="color-square" style="background-color:{c}"></div>'
+            )
+
+              # 
+            display_cols = ["MatchColorSquare", "Peptide", "Predicted Epitopes"]
+            display_df = epitopes_display[display_cols].copy()
+
+              # 
+            st.write(
+                """
+                <style>
+                .color-square {
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 3px;
+                    display: inline-block;
+                    margin-right: 6px;
+                    vertical-align: middle;
+                }
+                </style>
+                """, unsafe_allow_html=True
+            )
+
+             # 
+            for idx, row in display_df.iterrows():
+                st.markdown(
+                    f"{row['MatchColorSquare']} **Peptide:** `{row['Peptide']}`  |  **Predicted Epitopes:** {row['Predicted Epitopes']}",
+                    unsafe_allow_html=True
+                )
+
+        st.markdown('</div>', unsafe_allow_html=True)
